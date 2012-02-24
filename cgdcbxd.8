@@ -1,0 +1,93 @@
+.TH CGDCBXD  8 2012-01-16 "Linux" "libcgroup Manual"
+.SH NAME
+cgdcbxd \- control group dcb event net_prio daemon
+
+.SH SYNOPSIS
+\fBcgdcbxd\fR [options]
+
+.SH DESCRIPTION
+\fBcgdcbxd\fR is a daemon used to monitor DCB netlink events and manage the
+net_prio control group subsystem. The daemon keeps the hierarchy and priority
+mappings in sync with DCBX Application events.
+
+When a DCB netlink event is received \fBcgdcbxd\fR parses the application TLV
+and identifies new, updated, and deleted application tuples. The DCBX
+application TLV uses the selector, protocol ID and priority fields to identify
+and set application priority. The \fBselector\fR field specifies the protocol ID
+type supported types are
+
+.in
+.B Ethertype =
+1
+.in
+.B TCP or SCTP =
+2
+.in
+.B UDP or DCCP =
+3
+.in
+.B TCP, SCTP UDP, and DCCP =
+4
+
+The \fBprotocol ID\fR field specifies the port or ethertype depending on the
+selector field and the \fBpriority\fR gives a priority value (0-7). Used to set
+the net_prio.ifpriomap.
+
+When a new application tuple is identified \fBcgdcbxd\fR creates a control group
+under the net_prio subsystem using the directory
+\fBcgdcbx-<selector>-<protocolID>\fR.
+
+The \fB<selector>\fR field uses the IEEE selector values listed above for both CEE
+DCBX and IEEE DCBX versions.
+
+This control group will be managed by \fBcgdcbx\fR and the \fBifpriomap\fR will
+be kept in sync with the application TLV. If a DCB netlink event removes the
+application selector-protocolID tuple then \fBcgdcbx\fR removes the control
+group.
+
+This may be used with \fBcgrulesengd\fR to create configuration rules that map
+applications and users to DCBX selector-protocolID tuples. Note protocol ID and
+selector values use the well-known protocol type and port or ethertype defined
+by the IANA (Internet Assigned Numbers Authority) the application are not
+required to use the well-known ports this is only used to identify the application.
+
+.SH OPTIONS
+.TP
+.B -h
+Display help.
+.TP
+.B -n
+Don't fork the daemon, stay in the foreground.
+.TP
+.B -v
+Verbose logging
+.TP
+.SH FILES
+.LP
+.PD .1v
+.TP 20
+.B /etc/cgrules.conf
+.TP
+the default libcgroup configuration file
+
+.SH SOURCES
+.TP
+o
+IEEE 802.1Qaz (http://www.ieee802.org/1/pages/dcbridges.html)
+o
+IANA (http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xml)
+
+.SH NOTES
+Support for the net_prio subsystem was added in the 3.3 Linux kernel.
+
+.SH Signals
+\fBSIGUSR1\fR dumps list of managed interfaces and control groups with priomaps.
+
+.SH SEE ALSO
+.BR cgrulesengd (8),
+.BR cgrules.conf (5)
+.BR lldpad (8),
+.BR lldptool (8),
+
+.SH AUTHOR
+John Fastabend <john.r.fastabend@intel.com>

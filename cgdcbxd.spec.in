@@ -1,0 +1,67 @@
+Name:           cgdcbxd 
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Control Group DCBX Daemon
+
+Group:          System Environment/Daemons
+License:        GPLv2
+URL:            https://github.com/jrfastab/Linux-cgdcbxd
+Source0:        https://github.com/jrfastab/Linux-cgdcbxd
+BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+
+# BuildRequires:  
+Requires(post):   chkconfig
+Requires(preun):  chkconfig initscripts
+Requires(postun): initscripts
+
+%description
+This package contains a Linux user space daemon to monitor DCB Netlink
+application events and manage the net_prio control group.
+
+%prep
+%setup -q
+
+
+%build
+%configure
+make %{?_smp_mflags}
+
+
+%install
+rm -rf $RPM_BUILD_ROOT
+make install DESTDIR=$RPM_BUILD_ROOT
+
+
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+
+%post
+/sbin/chkconfig --add cgdcbxd 
+
+%preun
+if [ $1 = 0 ]; then
+        /sbin/service cgdcbxd stop
+        /sbin/chkconfig --del cgdcbxd 
+fi
+
+%postun
+if [ $1 = 1 ]; then
+        /sbin/service cgdcbxd condrestart
+fi
+
+
+%files
+%defattr(-,root,root,-)
+%doc COPYING
+%doc ChangeLog
+%{_sbindir}/*
+%{_mandir}/man8/*
+
+%files devel
+%defattr(-,root,root,-)
+%doc COPYING
+
+%changelog
+* Mon Feb 24 2012 John Fastabend <john.r.fastabend@intel.com> - 1.0.0
+- create cgdcbxd
