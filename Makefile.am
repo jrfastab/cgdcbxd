@@ -13,6 +13,9 @@ dist_noinst_DATA = cgdcbxd.spec COPYING
 ## cgdcbxd.init is listed here because it gets installed from install-data-local
 dist_noinst_SCRIPTS = cgdcbxd.init
 
+## man pages
+dist_man_MANS = cgdcbxd.8
+
 ## special hooks to handle the init script
 install-data-local: cgdcbxd.init
 	$(MKDIR_P) $(DESTDIR)/etc/init.d
