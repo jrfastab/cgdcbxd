@@ -42,6 +42,8 @@
 #include <unistd.h>
 #include <time.h>
 
+#define UNUSED __attribute__((__unused__))
+
 #define PID_FILE "/var/run/cgdcbxd.pid"
 #define NET_PRIO "net_prio"
 #define IFPRIOMAP "net_prio.ifpriomap"
@@ -415,7 +417,7 @@ static __u8 cee2app_selector(__u8 selector)
 	return s;
 }
 
-static __u16 cee2app_protocol(__u8 selector, __u16 protocol)
+static __u16 cee2app_protocol(UNUSED __u8 selector, __u16 protocol)
 {
 	return protocol;
 }
@@ -523,7 +525,7 @@ static int cgdcbx_getdcbx_reply(const struct nlmsghdr *nlh, void *data)
 	return MNL_CB_OK;
 }
 
-static int cgdcbx_data_cb(const struct nlmsghdr *nlh, void *data)
+static int cgdcbx_data_cb(const struct nlmsghdr *nlh, UNUSED void *data)
 {
 	struct nlattr *tb[IFLA_MAX + 1] = {};
 	struct dcbmsg *dcb;

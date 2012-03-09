@@ -5,7 +5,7 @@ cgdcbxd_LDADD = -lcgroup -lrt -lmnl
 
 ACLOCAL_AMFLAGS = -I m4
 
-AM_CFLAGS = -Wall
+AM_CFLAGS = -Wall -Wextra
 
 ## put a spec file and documentation in the distribution archive
 dist_noinst_DATA = cgdcbxd.spec COPYING
