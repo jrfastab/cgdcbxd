@@ -138,8 +138,7 @@ case "$1" in
 	start)
 		[ "$EUID" = "0" ] || exit 4
 		echo -n $"Starting $CGDCBXD: "
-		$CGDCBXD_BIN -k
-		start_daemon $CGDCBXD_BIN -d $OPTIONS
+		start_daemon $CGDCBXD_BIN $OPTIONS
 		rc_status -v
 		[ $? -eq 0 ] && touch /var/lock/subsys/cgdcbxd
 		;;
