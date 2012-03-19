@@ -72,8 +72,7 @@ static void usage(int status, const char *program_name)
 			"\n"
 			"options:\n"
 			"   -h  show this usage\n"
-			"   -n  don't fork daemon\n"
-			"   -v  verbose mode\n",
+			"   -n  don't fork daemon\n",
 			program_name);
 	} else {
 		fprintf(stdout, "%s", program_name);
