@@ -68,7 +68,7 @@ static void usage(int status, const char *program_name)
 	if (!status) {
 		fprintf(stderr,
 			"\n"
-			"Usage: %s [-hnsv]"
+			"Usage: %s [-hn]"
 			"\n"
 			"options:\n"
 			"   -h  show this usage\n"
