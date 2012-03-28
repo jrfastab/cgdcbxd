@@ -432,8 +432,6 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 	struct nlattr *pos;
 	struct cgdcbx_entry *np;
 
-	printf("%s %s: CEE event\n", __func__, iface->ifname);
-
 	LIST_FOREACH(np, &iface->apps, entry) {
 		np->active = false;
 	}
@@ -568,7 +566,6 @@ static int cgdcbx_data_cb(const struct nlmsghdr *nlh, UNUSED void *data)
 			iface->mode = DCB_CAP_DCBX_VER_CEE;
 		}
 
-		printf("%s %s: DCB_ATTR_CEE event\n", __func__, iface->ifname);
 		mnl_attr_parse_nested(tb[DCB_ATTR_CEE], parse_attr_cee, tbx);
 		app_nest = tbx[DCB_ATTR_CEE_APP_TABLE];
 		if (app_nest)
