@@ -83,6 +83,7 @@ static int data_attr_cb(const struct nlattr *attr, void *data)
 {
 	const struct nlattr **tb = (const struct nlattr **)data;
 	int type = mnl_attr_get_type(attr);
+	int ret = 0;
 
 	/* skip unsupported attribute in user-space */
 	if (mnl_attr_type_valid(attr, DCB_CMD_MAX) < 0)
@@ -90,23 +91,21 @@ static int data_attr_cb(const struct nlattr *attr, void *data)
 
 	switch (type) {
 	case DCB_ATTR_IFNAME:
-		if (mnl_attr_validate(attr, MNL_TYPE_STRING) < 0) {
-			perror("mnl_attr_validate");
-			return MNL_CB_ERROR;
-		}
+		ret = mnl_attr_validate(attr, MNL_TYPE_STRING);
 		break;
 	case DCB_ATTR_APP:
-		if (mnl_attr_validate(attr, MNL_TYPE_NESTED) < 0) {
-			perror("mnl_attr_validate");
-			return MNL_CB_ERROR;
-		}
+		ret = mnl_attr_validate(attr, MNL_TYPE_NESTED);
 		break;
 	case DCB_CMD_GDCBX:
-		if (mnl_attr_validate(attr, MNL_TYPE_U8) < 0) {
-			perror("mnl_attr_validate");
-			return MNL_CB_ERROR;
-		}
+		ret = mnl_attr_validate(attr, MNL_TYPE_U8);
+		break;
 	}
+
+	if (ret < 0) {
+		perror("mnl_attr_validate");
+		return MNL_CB_ERROR;
+	}
+
 	tb[type] = attr;
 	return MNL_CB_OK;
 }
