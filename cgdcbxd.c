@@ -787,6 +787,7 @@ static void cgdcbx_usr1_signal()
 {
 	struct cgdcbx_iface *np;
 	struct cgdcbx_entry *entry;
+	struct cgdcbx_virt *virt;
 
 	fprintf(stdout, "cgdcbx --- ifname: (priority, selector, protocol)\n");
 
@@ -794,6 +795,13 @@ static void cgdcbx_usr1_signal()
 		fprintf(stdout, "%s:", np->ifname);
 		LIST_FOREACH(entry, &np->apps, entry) {
 			cgdcbx_app_print(entry);
+		}
+
+		if (!LIST_EMPTY(&np->virt)) {
+			fprintf(stdout, "\n  virt: ");
+			LIST_FOREACH(virt, &np->virt, entry) {
+				fprintf(stdout, " %s", virt->ifname);
+			}
 		}
 		fprintf(stdout, "\n");
 	}
