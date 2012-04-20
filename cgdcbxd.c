@@ -48,6 +48,13 @@
 #define NET_PRIO "net_prio"
 #define IFPRIOMAP "net_prio.ifpriomap"
 
+struct cgdcbx_virt {
+	char *ifname;
+	int ifindex;
+	__u32 iflink;
+	LIST_ENTRY(cgdcbx_virt) entry;
+};
+
 struct cgdcbx_entry {
 	struct dcb_app app;
 	bool active;
@@ -57,7 +64,9 @@ struct cgdcbx_entry {
 struct cgdcbx_iface {
 	char *ifname;
 	int mode;
+	int ifindex;
 	LIST_HEAD(cgdcbx_apps, cgdcbx_entry) apps;
+	LIST_HEAD(cgdcbx_slaves, cgdcbx_virt) virt;
 	LIST_ENTRY(cgdcbx_iface) entry;
 };
 
@@ -79,7 +88,7 @@ static void usage(int status, const char *program_name)
 	}
 }
 
-static int data_attr_cb(const struct nlattr *attr, void *data)
+static int dcb_attr_cb(const struct nlattr *attr, void *data)
 {
 	const struct nlattr **tb = (const struct nlattr **)data;
 	int type = mnl_attr_get_type(attr);
@@ -189,15 +198,105 @@ static int cgdcbx_del_cgroup(struct cgroup *cg)
 	return err;
 }
 
+static int link_attr_cb(const struct nlattr *attr, void *data)
+{
+	const struct nlattr **tb = (const struct nlattr **)data;
+	int type = mnl_attr_get_type(attr);
 
-static void cgdcbx_modify_cgroup(struct cgdcbx_entry *np,
+	/* skip unsupported attribute in user-space */
+	if (mnl_attr_type_valid(attr, IFLA_MAX) < 0)
+		return MNL_CB_OK;
+
+	switch (type) {
+	case IFLA_IFNAME:
+		if (mnl_attr_validate(attr, MNL_TYPE_STRING) < 0) {
+			perror("mnl_attr_validate IFLA_IFNAME");
+			return MNL_CB_ERROR;
+		}
+		break;
+	case IFLA_LINK:
+		if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0) {
+			perror("mnl_attr_validate IFLA_LINK");
+			return MNL_CB_ERROR;
+		}
+		break;
+	}
+
+	tb[type] = attr;
+	return MNL_CB_OK;
+}
+
+static int cgdcbx_link_cb(const struct nlmsghdr *nlh, void *data)
+{
+	struct cgdcbx_iface *iface;
+	struct cgdcbx_iface **cb_iface = data;
+	const struct nlattr *tb[IFLA_MAX+1] = {};
+	struct ifinfomsg *ifm = mnl_nlmsg_get_payload(nlh);
+
+	mnl_attr_parse(nlh, sizeof(*ifm), link_attr_cb, tb);
+
+	/* Require IFLA_IFNAME attribute to build priomap string */
+	if (!tb[IFLA_IFNAME])
+		goto out;
+
+	/* Add priomap string to cgroup */
+	if (tb[IFLA_LINK]) {
+		struct cgdcbx_virt *v, *virt;
+		__u32 iflink = mnl_attr_get_u32(tb[IFLA_LINK]);
+
+		/* Check that device does not already exist */
+		LIST_FOREACH(iface, &iface_list, entry) {
+			LIST_FOREACH(v, &iface->virt, entry) {
+				if (v->ifindex == ifm->ifi_index)
+					goto out;
+			}
+		}
+
+		virt = malloc(sizeof(struct cgdcbx_virt));
+		if (!virt)
+			goto out;
+
+		virt->ifname = strdup(mnl_attr_get_str(tb[IFLA_IFNAME]));
+		virt->ifindex = ifm->ifi_index;
+		virt->iflink = iflink;
+
+		/* Devices can be stacked on other virtual devices so we
+		 * must search list of virtual devices for a map and add
+		 * to virtual device list to propagate priority.
+		 */
+		LIST_FOREACH(iface, &iface_list, entry) {
+			if (iflink == if_nametoindex(iface->ifname)) {
+				LIST_INSERT_HEAD(&iface->virt, virt, entry);
+				goto out;
+			}
+			LIST_FOREACH(v, &iface->virt, entry) {
+				if (iflink == if_nametoindex(v->ifname)) {
+					LIST_INSERT_HEAD(&iface->virt,
+							 virt,
+							 entry);
+					goto out;
+				}
+			}
+		}
+
+		free(virt->ifname);
+		free(virt);
+	}
+	iface = NULL;
+out:
+	if (cb_iface)
+		*cb_iface = iface;
+	return MNL_CB_OK;
+}
+
+static void cgdcbx_modify_cgroup(char *ifname,
 				 struct cgdcbx_iface *iface,
+				 struct cgdcbx_entry *np,
 				 bool purge)
 {
 	struct cgroup *cg_app;
 	struct cgroup_controller *cg_ctrl;
 	char file[19];
-	char *name = iface->ifname;
 	int err;
 
 	/* selector == 1 and protocol == 0 is a special case which
@@ -238,11 +337,9 @@ static void cgdcbx_modify_cgroup(struct cgdcbx_entry *np,
 	}
 
 	if (!np->active && purge) {
-		err = cgdcbx_del_cgroup(cg_app);
-		if (!err) {
-			LIST_REMOVE(np, entry);
-			free(np);
-		}
+		/* Only remove cgroup for real devices */
+		if (strncmp(ifname, iface->ifname, sizeof(ifname)) == 0)
+			err = cgdcbx_del_cgroup(cg_app);
 	} else {
 		char value[IFNAMSIZ + 3];
 
@@ -255,8 +352,8 @@ static void cgdcbx_modify_cgroup(struct cgdcbx_entry *np,
 			goto err;
 		}
 
-		snprintf(value, sizeof(value), "%s %i", name, np->app.priority);
-
+		snprintf(value, sizeof(value), "%s %i",
+			 ifname, np->app.priority);
 		err = cgroup_add_value_string(cg_ctrl, IFPRIOMAP, value);
 		if (err) {
 			fprintf(stderr,
@@ -265,18 +362,12 @@ static void cgdcbx_modify_cgroup(struct cgdcbx_entry *np,
 				cgroup_strerror(err));
 			goto err;
 		}
-		err = cgroup_modify_cgroup(cg_app);
-	}
 
-	if (err) {
-		fprintf(stderr, "cgdcbx: libcgroup %s modify failed: %s\n",
-			file, cgroup_strerror(err));
+		cgroup_modify_cgroup(cg_app);
 	}
-
 err:
 	cgroup_free(&cg_app);
 }
-
 
 static void cgdcbx_update_iface_cg(struct cgdcbx_iface *iface, bool purge)
 {
@@ -285,12 +376,111 @@ static void cgdcbx_update_iface_cg(struct cgdcbx_iface *iface, bool purge)
 	entry = LIST_FIRST(&iface->apps);
 	while (entry) {
 		struct cgdcbx_entry *np = entry;
+		struct cgdcbx_virt *virt;
 
 		entry = LIST_NEXT(entry, entry);
-		cgdcbx_modify_cgroup(np, iface, purge);
+		cgdcbx_modify_cgroup(iface->ifname, iface, np, purge);
+
+		if (!purge) {
+			virt = LIST_FIRST(&iface->virt);
+			while (virt) {
+				struct cgdcbx_virt *v = virt;
+
+				virt = LIST_NEXT(virt, entry);
+				cgdcbx_modify_cgroup(v->ifname, iface,
+						     np, purge);
+			}
+		}
 	}
 
 	return;
+}
+
+static void cgdcbx_update_iface_cg_all(void)
+{
+	struct cgdcbx_iface *iface;
+
+	LIST_FOREACH(iface, &iface_list, entry) {
+		cgdcbx_update_iface_cg(iface, false);
+	}
+}
+
+static void cgdcbx_populate_virtual_devs(void)
+{
+	static struct mnl_socket *nl;
+	struct nlmsghdr *nlh;
+	struct rtgenmsg *rt;
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	unsigned int portid;
+	int ret, groups = 0;
+
+	nl = mnl_socket_open(NETLINK_ROUTE);
+	if (!nl) {
+		perror("mnl_socket_open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (mnl_socket_bind(nl, groups, MNL_SOCKET_AUTOPID) < 0) {
+		perror("mnl_socket_bind");
+		exit(EXIT_FAILURE);
+	}
+	portid = mnl_socket_get_portid(nl);
+
+	memset(buf, 0, sizeof(buf));
+	nlh = mnl_nlmsg_put_header(buf);
+	nlh->nlmsg_type = RTM_GETLINK;
+	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	nlh->nlmsg_seq = time(NULL);
+
+	rt = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtgenmsg));
+	rt->rtgen_family = AF_PACKET;
+
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+		perror("cgdcbx: init_tables, mnl_socket_send");
+		return;
+	}
+
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	while (ret > 0) {
+		ret = mnl_cb_run(buf, ret, 0, portid,
+				 cgdcbx_link_cb, NULL);
+		if (ret <= MNL_CB_STOP)
+			break;
+		ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	}
+
+	mnl_socket_close(nl);
+	return;
+}
+
+static void cgdcbx_free_apps(struct cgdcbx_iface *iface)
+{
+	struct cgdcbx_entry *app;
+
+	app = LIST_FIRST(&iface->apps);
+	while (app) {
+		struct cgdcbx_entry *a = app;
+
+		app = LIST_NEXT(app, entry);
+		LIST_REMOVE(a, entry);
+		free(a);
+	}
+
+}
+
+static void cgdcbx_free_virt(struct cgdcbx_iface *iface)
+{
+	struct cgdcbx_virt *virt;
+
+	virt = LIST_FIRST(&iface->virt);
+	while (virt) {
+		struct cgdcbx_virt *v = virt;
+
+		virt = LIST_NEXT(virt, entry);
+		LIST_REMOVE(v, entry);
+		free(v->ifname);
+		free(v);
+	}
 }
 
 static void cgdcbx_int_signal()
@@ -311,6 +501,8 @@ static void cgdcbx_int_signal()
 		cgdcbx_update_iface_cg(np, true);
 
 		LIST_REMOVE(np, entry);
+		cgdcbx_free_apps(np);
+		cgdcbx_free_virt(np);
 		free(np->ifname);
 		free(np);
 	}
@@ -485,6 +677,7 @@ static struct cgdcbx_iface *cgdcbx_add_iface(const char *ifname)
 		return NULL;
 
 	LIST_INIT(&entry->apps);
+	LIST_INIT(&entry->virt);
 	LIST_INSERT_HEAD(&iface_list, entry, entry);
 
 	return entry;
@@ -509,9 +702,12 @@ static int cgdcbx_getdcbx_reply(const struct nlmsghdr *nlh, void *data)
 	__u8 bitmask = 0;
 	__u8 *mode = data;
 
+	if (nlh->nlmsg_type != RTM_GETDCB)
+		return MNL_CB_OK;
+
 	dcb = mnl_nlmsg_get_payload(nlh);
 
-	mnl_attr_parse(nlh, sizeof(*dcb), data_attr_cb, tb);
+	mnl_attr_parse(nlh, sizeof(*dcb), dcb_attr_cb, tb);
 	if (tb[DCB_ATTR_DCBX]) {
 		bitmask = mnl_attr_get_u8(tb[DCB_ATTR_DCBX]);
 		*mode = bitmask &
@@ -521,7 +717,7 @@ static int cgdcbx_getdcbx_reply(const struct nlmsghdr *nlh, void *data)
 	return MNL_CB_OK;
 }
 
-static int cgdcbx_data_cb(const struct nlmsghdr *nlh, UNUSED void *data)
+static int cgdcbx_dcb_cb(const struct nlmsghdr *nlh, UNUSED void *data)
 {
 	struct nlattr *tb[IFLA_MAX + 1] = {};
 	struct dcbmsg *dcb;
@@ -529,7 +725,7 @@ static int cgdcbx_data_cb(const struct nlmsghdr *nlh, UNUSED void *data)
 
 	dcb = mnl_nlmsg_get_payload(nlh);
 
-	mnl_attr_parse(nlh, sizeof(*dcb), data_attr_cb, tb);
+	mnl_attr_parse(nlh, sizeof(*dcb), dcb_attr_cb, tb);
 	if (tb[DCB_ATTR_IFNAME]) {
 		const char *ifname = mnl_attr_get_str(tb[DCB_ATTR_IFNAME]);
 
@@ -537,8 +733,7 @@ static int cgdcbx_data_cb(const struct nlmsghdr *nlh, UNUSED void *data)
 		if (!iface)
 			return MNL_CB_OK;
 	} else {
-		fprintf(stderr, "dcb poorly formated nlmsg\n");
-		return MNL_CB_OK;
+		return MNL_CB_STOP;
 	}
 
 	if (tb[DCB_ATTR_IEEE]) {
@@ -612,7 +807,7 @@ static void cgdcbx_init_tables(struct mnl_socket *nl)
 	char buf[MNL_SOCKET_BUFFER_SIZE];
 	unsigned int seq, portid;
 	int ret;
-	__u8 mode;
+	__u8 mode = 0;
 
 	nameidx = if_nameindex();
 	if (nameidx == NULL) {
@@ -622,7 +817,6 @@ static void cgdcbx_init_tables(struct mnl_socket *nl)
 
 	portid = mnl_socket_get_portid(nl);
 	p = nameidx;
-
 
 	while (p->if_index != 0) {
 		memset(buf, 0, sizeof(buf));
@@ -677,7 +871,7 @@ static void cgdcbx_init_tables(struct mnl_socket *nl)
 
 		ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
 		if (ret > 0)
-			mnl_cb_run(buf, ret, 0, portid, cgdcbx_data_cb, NULL);
+			mnl_cb_run(buf, ret, 0, portid, cgdcbx_dcb_cb, NULL);
 index_failure:
 		p++;
 	}
@@ -685,17 +879,32 @@ index_failure:
 	if_freenameindex(nameidx);
 }
 
+static void cgdcbxd_sock_init(struct mnl_socket **nl, int groups)
+{
+	*nl = mnl_socket_open(NETLINK_ROUTE);
+	if (*nl == NULL) {
+		perror("mnl_socket_open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (mnl_socket_bind(*nl, groups, MNL_SOCKET_AUTOPID) < 0) {
+		perror("mnl_socket_bind");
+		exit(EXIT_FAILURE);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	int ret, err;
 	int c;
-	struct mnl_socket *nl;
 	char buf[MNL_SOCKET_BUFFER_SIZE];
-	unsigned int groups = 1 << (RTNLGRP_DCB - 1);
+	unsigned int groups;
 	unsigned char daemonize = 1;
-	int nlfd, pidfd;
+	int nlfd_dcb, nlfd_rt, max_fd, pidfd;
+	int rcv_size = 8192;
 	fd_set fds, readfds;
 	sigset_t sigset;
+	static struct mnl_socket *nl_dcb, *nl_rt;
 	struct sigaction sa_usr1, sa_int;
 	struct option longopts[] = {
 			{ 0, 0, 0, 0}
@@ -715,16 +924,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	nl = mnl_socket_open(NETLINK_ROUTE);
-	if (!nl) {
-		perror("mnl_socket_open");
-		exit(EXIT_FAILURE);
-	}
+	groups = 1 << (RTNLGRP_DCB - 1);
+	cgdcbxd_sock_init(&nl_dcb, groups);
 
-	if (mnl_socket_bind(nl, groups, MNL_SOCKET_AUTOPID) < 0) {
-		perror("mnl_socket_bind");
-		exit(EXIT_FAILURE);
-	}
+	groups = 1 << (RTNLGRP_LINK - 1);
+	cgdcbxd_sock_init(&nl_rt, groups);
 
 	ret = cgroup_init();
 	if (ret) {
@@ -733,9 +937,14 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	nlfd = mnl_socket_get_fd(nl);
+	nlfd_dcb = mnl_socket_get_fd(nl_dcb);
+	nlfd_rt = mnl_socket_get_fd(nl_rt);
 	FD_ZERO(&readfds);
-	FD_SET(nlfd, &readfds);
+	FD_SET(nlfd_dcb, &readfds);
+	FD_SET(nlfd_rt, &readfds);
+
+	setsockopt(nlfd_dcb, SOL_SOCKET, SO_RCVBUF, &rcv_size, sizeof(int));
+	setsockopt(nlfd_rt, SOL_SOCKET, SO_RCVBUF, &rcv_size, sizeof(int));
 
 	memset(&sa_usr1, 0, sizeof(sa_usr1));
 	sa_usr1.sa_handler = &cgdcbx_usr1_signal;
@@ -808,27 +1017,44 @@ int main(int argc, char *argv[])
 	sigaddset(&sigset, SIGUSR1);
 
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
-	cgdcbx_init_tables(nl);
+	/* Find DCB enabled interfaces */
+	cgdcbx_init_tables(nl_dcb);
+	/* Find any stacked interfaces */
+	cgdcbx_populate_virtual_devs();
+	/* Set priority on stacked devices */
+	cgdcbx_update_iface_cg_all();
 	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
+
+	max_fd = (nlfd_rt > nlfd_dcb) ? nlfd_rt : nlfd_dcb;
 
 	for (;;) {
 		memcpy(&fds, &readfds, sizeof(fd_set));
 		errno = 0;
-		err = select(nlfd + 1, &fds, NULL, NULL, NULL);
+		err = select(max_fd + 1, &fds, NULL, NULL, NULL);
 		if (err < 0 && errno != EINTR) {
 			fprintf(stderr,
 				"selecting error: %s\n",
 				strerror(errno));
 			goto err;
-		} else if (errno != EINTR && FD_ISSET(nlfd, &fds)) {
+		} else if (errno != EINTR && FD_ISSET(nlfd_dcb, &fds)) {
 			sigprocmask(SIG_BLOCK, &sigset, NULL);
-			ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
-			ret = mnl_cb_run(buf, ret, 0, 0, cgdcbx_data_cb, NULL);
-			if (ret <= 0)
-				fprintf(stderr,
-					"mnl_cb_run error -- proceed.\n");
+			ret = mnl_socket_recvfrom(nl_dcb, buf, sizeof(buf));
+			ret = mnl_cb_run(buf, ret, 0, 0, cgdcbx_dcb_cb, NULL);
 			sigprocmask(SIG_UNBLOCK, &sigset, NULL);
+		} else if (errno != EINTR && FD_ISSET(nlfd_rt, &fds)) {
+			struct cgdcbx_iface *iface;
+
+			ret = mnl_socket_recvfrom(nl_rt, buf, sizeof(buf));
+			ret = mnl_cb_run(buf, ret, 0, 0,
+					 cgdcbx_link_cb, &iface);
+
+			if (iface)
+				cgdcbx_update_iface_cg(iface, false);
 		}
+
+		if (ret < MNL_CB_STOP)
+			fprintf(stderr, "mnl_cb_run error: %s\n",
+				strerror(errno));
 	}
 
 pidfd_err:
@@ -839,6 +1065,7 @@ err:
 		exit(EXIT_FAILURE);
 	}
 
-	mnl_socket_close(nl);
+	mnl_socket_close(nl_dcb);
+	mnl_socket_close(nl_rt);
 	return 0;
 }
