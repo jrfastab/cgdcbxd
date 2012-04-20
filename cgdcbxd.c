@@ -226,10 +226,18 @@ static int link_attr_cb(const struct nlattr *attr, void *data)
 	return MNL_CB_OK;
 }
 
+struct cgdcbx_link_data {
+	struct cgdcbx_iface *iface;
+	struct cgdcbx_virt *virt;
+	int nlmsg_type;
+	unsigned ifi_flags;
+};
+
 static int cgdcbx_link_cb(const struct nlmsghdr *nlh, void *data)
 {
-	struct cgdcbx_iface *iface;
-	struct cgdcbx_iface **cb_iface = data;
+	struct cgdcbx_iface *iface = NULL;
+	struct cgdcbx_virt *virt = NULL;
+	struct cgdcbx_link_data *cgdcbx_data = data;
 	const struct nlattr *tb[IFLA_MAX+1] = {};
 	struct ifinfomsg *ifm = mnl_nlmsg_get_payload(nlh);
 
@@ -241,13 +249,13 @@ static int cgdcbx_link_cb(const struct nlmsghdr *nlh, void *data)
 
 	/* Add priomap string to cgroup */
 	if (tb[IFLA_LINK]) {
-		struct cgdcbx_virt *v, *virt;
+		struct cgdcbx_virt *v;
 		__u32 iflink = mnl_attr_get_u32(tb[IFLA_LINK]);
 
 		/* Check that device does not already exist */
 		LIST_FOREACH(iface, &iface_list, entry) {
-			LIST_FOREACH(v, &iface->virt, entry) {
-				if (v->ifindex == ifm->ifi_index)
+			LIST_FOREACH(virt, &iface->virt, entry) {
+				if (virt->ifindex == ifm->ifi_index)
 					goto out;
 			}
 		}
@@ -281,11 +289,24 @@ static int cgdcbx_link_cb(const struct nlmsghdr *nlh, void *data)
 
 		free(virt->ifname);
 		free(virt);
+	} else {
+		/* Check that device does not already exist */
+		LIST_FOREACH(iface, &iface_list, entry) {
+			if (iface->ifindex == ifm->ifi_index)
+				goto out;
+		}
+
+		/* If device is not being tracked wait for DCB event */
 	}
 	iface = NULL;
+	virt = NULL;
 out:
-	if (cb_iface)
-		*cb_iface = iface;
+	if (cgdcbx_data) {
+		cgdcbx_data->nlmsg_type = nlh->nlmsg_type;
+		cgdcbx_data->iface = iface;
+		cgdcbx_data->virt = virt;
+		cgdcbx_data->ifi_flags = ifm->ifi_flags;
+	}
 	return MNL_CB_OK;
 }
 
@@ -363,7 +384,16 @@ static void cgdcbx_modify_cgroup(char *ifname,
 			goto err;
 		}
 
-		cgroup_modify_cgroup(cg_app);
+		err = cgroup_modify_cgroup(cg_app);
+		if (err) {
+			fprintf(stderr,
+				"cgdcbx: libcgroup modify \"%s %s\" cgroup failed(%i): %s\n",
+				value,
+				file,
+				err,
+				cgroup_strerror(err));
+			goto err;
+		}
 	}
 err:
 	cgroup_free(&cg_app);
@@ -483,6 +513,22 @@ static void cgdcbx_free_virt(struct cgdcbx_iface *iface)
 	}
 }
 
+static void cgdcbx_free_iface(struct cgdcbx_iface *iface,
+			      struct cgdcbx_virt *virt)
+{
+	if (!virt) {
+		LIST_REMOVE(iface, entry);
+		cgdcbx_free_apps(iface);
+		cgdcbx_free_virt(iface);
+		free(iface->ifname);
+		free(iface);
+	} else {
+		LIST_REMOVE(virt, entry);
+		free(virt->ifname);
+		free(virt);
+	}
+}
+
 static void cgdcbx_int_signal()
 {
 	struct cgdcbx_iface *entry;
@@ -499,12 +545,7 @@ static void cgdcbx_int_signal()
 		}
 
 		cgdcbx_update_iface_cg(np, true);
-
-		LIST_REMOVE(np, entry);
-		cgdcbx_free_apps(np);
-		cgdcbx_free_virt(np);
-		free(np->ifname);
-		free(np);
+		cgdcbx_free_iface(np, NULL);
 	}
 
 	exit(EXIT_SUCCESS);
@@ -672,6 +713,7 @@ static struct cgdcbx_iface *cgdcbx_add_iface(const char *ifname)
 		return NULL;
 
 	entry->ifname = strdup(ifname);
+	entry->ifindex = if_nametoindex(ifname);
 
 	if (!entry->ifname)
 		return NULL;
@@ -1050,14 +1092,20 @@ int main(int argc, char *argv[])
 			ret = mnl_cb_run(buf, ret, 0, 0, cgdcbx_dcb_cb, NULL);
 			sigprocmask(SIG_UNBLOCK, &sigset, NULL);
 		} else if (errno != EINTR && FD_ISSET(nlfd_rt, &fds)) {
-			struct cgdcbx_iface *iface;
+			struct cgdcbx_link_data data = {.iface = NULL,
+							.virt = NULL,
+							.nlmsg_type = 0};
 
 			ret = mnl_socket_recvfrom(nl_rt, buf, sizeof(buf));
 			ret = mnl_cb_run(buf, ret, 0, 0,
-					 cgdcbx_link_cb, &iface);
+					 cgdcbx_link_cb, &data);
 
-			if (iface)
-				cgdcbx_update_iface_cg(iface, false);
+			if ((data.ifi_flags & IFF_RUNNING) &&
+			    (data.nlmsg_type != RTM_DELLINK) &&
+			    data.iface)
+				cgdcbx_update_iface_cg(data.iface, false);
+			else if ((data.nlmsg_type == RTM_DELLINK) && data.iface)
+				cgdcbx_free_iface(data.iface, data.virt);
 		}
 
 		if (ret < MNL_CB_STOP)
