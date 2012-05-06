@@ -72,20 +72,16 @@ struct cgdcbx_iface {
 
 LIST_HEAD(cgdcbx_iface_head, cgdcbx_iface) iface_list;
 
-static void usage(int status, const char *program_name)
+static void usage(const char *program_name)
 {
-	if (!status) {
-		fprintf(stderr,
-			"\n"
-			"Usage: %s [-hn]"
-			"\n"
-			"options:\n"
-			"   -h  show this usage\n"
-			"   -n  don't fork daemon\n",
-			program_name);
-	} else {
-		fprintf(stdout, "%s", program_name);
-	}
+	fprintf(stderr,
+		"\n"
+		"Usage: %s [-hn]"
+		"\n"
+		"options:\n"
+		"   -h  show this usage\n"
+		"   -n  don't fork daemon\n",
+		program_name);
 }
 
 static int dcb_attr_cb(const struct nlattr *attr, void *data)
@@ -966,13 +962,12 @@ int main(int argc, char *argv[])
 	while ((c = getopt_long(argc, argv, "hns", longopts, NULL)) > 0) {
 		switch (c) {
 		case 'h':
-			usage(0, argv[0]);
+			usage(argv[0]);
 			exit(0);
 		case 'n':
 			daemonize = 0;
 			break;
 		default:
-			usage(1, argv[0]);
 			exit(1);
 		}
 	}
