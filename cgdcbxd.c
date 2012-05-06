@@ -621,9 +621,11 @@ static int parse_attr_cee_nested_app(const struct nlattr *attr, void *data)
 	return MNL_CB_OK;
 }
 
+#define CGDCBX_CEE_APPSEL_ERROR	0xff
+
 static __u8 cee2app_selector(__u8 selector)
 {
-	__u8 s = 0;
+	__u8 s = CGDCBX_CEE_APPSEL_ERROR;
 
 	/* CEE Application TLV defines two selector types,
 	 *   0: Application Protocol ID is L2 Ethertype
@@ -699,7 +701,8 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 		app.protocol = cee2app_protocol(selector, protocol);
 		app.priority = cee2app_priority(priority);
 
-		entry = cgdcbx_lookup_app(iface, &app);
+		if (app.selector != CGDCBX_CEE_APPSEL_ERROR)
+			entry = cgdcbx_lookup_app(iface, &app);
 	}
 
 	cgdcbx_update_iface_cg(iface, false);
