@@ -980,7 +980,7 @@ int main(int argc, char *argv[])
 
 	ret = cgroup_init();
 	if (ret) {
-		fprintf(stderr, "%s: libcgroup intiialization failed: %s\n",
+		fprintf(stderr, "%s: libcgroup initialization failed: %s\n",
 			argv[0], cgroup_strerror(ret));
 		exit(EXIT_FAILURE);
 	}
