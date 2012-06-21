@@ -959,7 +959,7 @@ int main(int argc, char *argv[])
 			{ 0, 0, 0, 0}
 	};
 
-	while ((c = getopt_long(argc, argv, "hns", longopts, NULL)) > 0) {
+	while ((c = getopt_long(argc, argv, "vhns", longopts, NULL)) > 0) {
 		switch (c) {
 		case 'h':
 			usage(argv[0]);
@@ -967,6 +967,9 @@ int main(int argc, char *argv[])
 		case 'n':
 			daemonize = 0;
 			break;
+		case 'v':
+			printf("%s\n", PACKAGE_STRING);
+			exit(0);
 		default:
 			exit(1);
 		}
