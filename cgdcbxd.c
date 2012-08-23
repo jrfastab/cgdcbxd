@@ -579,6 +579,10 @@ static void cgdcbx_parse_app_table(struct cgdcbx_iface *iface,
 
 		app = mnl_attr_get_payload(pos);
 		entry = cgdcbx_lookup_app(iface, app);
+		if (!entry)
+			fprintf(stderr,
+				"cgdcbxd %s IEEE entry lookup failed\n",
+				iface->ifname);
 	}
 
 	cgdcbx_update_iface_cg(iface, false);
@@ -697,8 +701,13 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 		app.protocol = cee2app_protocol(selector, protocol);
 		app.priority = cee2app_priority(priority);
 
-		if (app.selector != CGDCBX_CEE_APPSEL_ERROR)
+		if (app.selector != CGDCBX_CEE_APPSEL_ERROR) {
 			entry = cgdcbx_lookup_app(iface, &app);
+			if (!entry)
+				fprintf(stderr,
+					"cgdcbxd %s CEE entry lookup failed\n",
+					iface->ifname);
+		}
 	}
 
 	cgdcbx_update_iface_cg(iface, false);
