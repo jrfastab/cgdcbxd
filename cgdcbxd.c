@@ -429,6 +429,9 @@ static void cgdcbx_update_iface_cg_all(void)
 	LIST_FOREACH(iface, &iface_list, entry) {
 		cgdcbx_update_iface_cg(iface, false);
 	}
+#ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
+	cgroup_change_all_cgroups();
+#endif
 }
 
 static void cgdcbx_populate_virtual_devs(void)
@@ -586,6 +589,9 @@ static void cgdcbx_parse_app_table(struct cgdcbx_iface *iface,
 	}
 
 	cgdcbx_update_iface_cg(iface, false);
+#ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
+	cgroup_change_all_cgroups();
+#endif
 }
 
 static int parse_attr_cee_nested_app(const struct nlattr *attr, void *data)
@@ -711,6 +717,9 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 	}
 
 	cgdcbx_update_iface_cg(iface, false);
+#ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
+	cgroup_change_all_cgroups();
+#endif
 }
 
 static struct cgdcbx_iface *cgdcbx_add_iface(const char *ifname)
@@ -1112,10 +1121,14 @@ int main(int argc, char *argv[])
 
 			if ((data.ifi_flags & IFF_RUNNING) &&
 			    (data.nlmsg_type != RTM_DELLINK) &&
-			    data.iface)
+			    data.iface) {
 				cgdcbx_update_iface_cg(data.iface, false);
-			else if ((data.nlmsg_type == RTM_DELLINK) && data.iface)
+#ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
+				cgroup_change_all_cgroups();
+#endif
+			} else if ((data.nlmsg_type == RTM_DELLINK) && data.iface) {
 				cgdcbx_free_iface(data.iface, data.virt);
+			}
 		}
 
 		if (ret < MNL_CB_STOP)

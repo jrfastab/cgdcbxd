@@ -6,7 +6,9 @@ AC_PROG_CC
 AC_SUBST(LIBMNL_CFLAGS)
 AC_SUBST(LIBMNL_LIBS)
 
-AC_CHECK_LIB(libmnl, libcgroup)
+# Require libcgroup but not new API
+PKG_CHECK_MODULES([LIBCGROUP], [libcgroup >= 0.32])
+AC_CHECK_LIB(cgroup, cgroup_change_all_cgroups, AC_DEFINE([HAVE_CGROUP_CHANGE_ALL_CGROUPS]))
 
 AC_CHECK_HEADER([libcgroup.h], ,[AC_MSG_ERROR(
 [Could not find libcgroup.h. Try installing libcgroup-devel])]
