@@ -65,6 +65,7 @@ struct cgdcbx_iface {
 	char *ifname;
 	int mode;
 	int ifindex;
+	int dflt_priority;
 	LIST_HEAD(cgdcbx_apps, cgdcbx_entry) apps;
 	LIST_HEAD(cgdcbx_slaves, cgdcbx_virt) virt;
 	LIST_ENTRY(cgdcbx_iface) entry;
@@ -158,28 +159,37 @@ static int parse_attr_cee(const struct nlattr *attr, void *data)
 	return MNL_CB_OK;
 }
 
-static struct cgdcbx_entry *cgdcbx_lookup_app(struct cgdcbx_iface *iface,
-					      struct dcb_app *app)
+static struct cgdcbx_entry *__cgdcbx_lookup_app(struct cgdcbx_iface *iface,
+						struct dcb_app *app)
 {
 	struct cgdcbx_entry *np;
-	struct cgdcbx_entry *entry;
 
 	LIST_FOREACH(np, &iface->apps, entry) {
 		if (np->app.selector == app->selector &&
-		    np->app.protocol == app->protocol) {
-			np->app.priority = app->priority;
-			np->active = true;
+		    np->app.protocol == app->protocol)
 			return np;
-		}
 	}
 
-	entry = malloc(sizeof(*entry));
-	if (!entry)
-		return NULL;
+	return NULL;
+}
 
-	memcpy(&entry->app, app, sizeof(entry->app));
-	entry->active = true;
-	LIST_INSERT_HEAD(&iface->apps, entry, entry);
+static struct cgdcbx_entry *cgdcbx_lookup_app(struct cgdcbx_iface *iface,
+					      struct dcb_app *app)
+{
+	struct cgdcbx_entry *entry = __cgdcbx_lookup_app(iface, app);
+
+	if (entry) {
+		entry->app.priority = app->priority;
+		entry->active = true;
+	} else {
+		entry = malloc(sizeof(*entry));
+		if (!entry)
+			return NULL;
+
+		memcpy(&entry->app, app, sizeof(entry->app));
+		entry->active = true;
+		LIST_INSERT_HEAD(&iface->apps, entry, entry);
+	}
 
 	return entry;
 }
@@ -306,33 +316,56 @@ out:
 	return MNL_CB_OK;
 }
 
-static void cgdcbx_modify_cgroup(char *ifname,
-				 struct cgdcbx_iface *iface,
-				 struct cgdcbx_entry *np,
-				 bool purge)
+static void cgdcbx_write_virtmap(struct cgdcbx_virt *virt,
+				 char *file, struct cgdcbx_entry *np)
+{
+	struct cgroup *vcg_app;
+	struct cgroup_controller *vcg_ctrl;
+	char value[IFNAMSIZ + 3];
+	int err;
+
+	vcg_app = cgroup_new_cgroup(file);
+	if (!vcg_app) {
+		fprintf(stderr,
+			"cgdcbx: libcgroup %s cgroup_new_cgroup failed\n",
+			file);
+		return;
+	}
+
+	vcg_ctrl = cgroup_get_controller(vcg_app, NET_PRIO);
+	if (!vcg_ctrl) {
+		vcg_ctrl = cgroup_add_controller(vcg_app, NET_PRIO);
+		if (!vcg_ctrl)
+			return;
+	}
+
+	err = cgroup_create_cgroup(vcg_app, 1);
+	if (err) {
+		fprintf(stderr,
+			"cgdcbx: libcgroup %s create failed: %s\n",
+			file,
+			cgroup_strerror(err));
+	}
+
+	snprintf(value, sizeof(value), "%s %i", virt->ifname, np->app.priority);
+
+	err = cgroup_add_value_string(vcg_ctrl, IFPRIOMAP, value);
+	if (err) {
+		fprintf(stderr,
+			"cgdcbx: %s: libcgroup %s add value failed: %s\n",
+			virt->ifname, file, cgroup_strerror(err));
+	}
+
+	err = cgroup_modify_cgroup(vcg_app);
+	cgroup_free(&vcg_app);
+}
+
+static void cgdcbx_write_ifpriomap(struct cgdcbx_iface *iface, char *file,
+				   struct cgdcbx_entry *np)
 {
 	struct cgroup *cg_app;
 	struct cgroup_controller *cg_ctrl;
-	char file[19];
 	int err;
-
-	/* selector == 1 and protocol == 0 is a special case which
-	 * indicates the default priority should be set. All other
-	 * cases use the selector-protocol control group syntax.
-	 */
-	if ((iface->mode == DCB_CAP_DCBX_VER_IEEE) &&
-	    np->app.selector == 1 &&
-	    np->app.protocol == 0)
-		snprintf(file, sizeof(file), "/");
-	else if (np->app.selector == 1) {
-		snprintf(file, sizeof(file), "cgdcb-%i-%04x",
-			 np->app.selector,
-			 np->app.protocol);
-	} else {
-		snprintf(file, sizeof(file), "cgdcb-%i-%i",
-			 np->app.selector,
-			 np->app.protocol);
-	}
 
 	cg_app = cgroup_new_cgroup(file);
 	if (!cg_app) {
@@ -353,12 +386,31 @@ static void cgdcbx_modify_cgroup(char *ifname,
 		}
 	}
 
-	if (!np->active && purge) {
-		/* Only remove cgroup for real devices */
-		if (strncmp(ifname, iface->ifname, sizeof(ifname)) == 0)
+	if (!np->active) {
+		struct cgdcbx_iface *itr;
+		struct cgdcbx_entry *entry = NULL;
+		struct dcb_app app = np->app;
+
+		entry = __cgdcbx_lookup_app(iface, &np->app);
+		if (entry) {
+			LIST_REMOVE(entry, entry);
+			free(entry);
+		} else {
+			fprintf(stderr, "cgdcbx: request delete entry that does not exist\n");
+		}
+
+		LIST_FOREACH(itr, &iface_list, entry) {
+			entry = __cgdcbx_lookup_app(itr, &app);
+
+			if (entry)
+				break;
+		}
+		/* Only remove cgroup if its not in use */
+		if (!entry)
 			err = cgdcbx_del_cgroup(cg_app);
 	} else {
 		char value[IFNAMSIZ + 3];
+		struct cgdcbx_virt *virt;
 
 		err = cgroup_create_cgroup(cg_app, 1);
 		if (err) {
@@ -370,14 +422,22 @@ static void cgdcbx_modify_cgroup(char *ifname,
 		}
 
 		snprintf(value, sizeof(value), "%s %i",
-			 ifname, np->app.priority);
+			 iface->ifname, np->app.priority);
 		err = cgroup_add_value_string(cg_ctrl, IFPRIOMAP, value);
 		if (err) {
 			fprintf(stderr,
-				"cgdcbx: libcgroup %s add value failed: %s\n",
+				"cgdcbx: %s: libcgroup %s add value failed: %s\n",
+				iface->ifname,
 				file,
 				cgroup_strerror(err));
 			goto err;
+		}
+
+		/* Update any stacked devices as well */
+		virt = LIST_FIRST(&iface->virt);
+		while (virt) {
+			cgdcbx_write_virtmap(virt, file, np);
+			virt = LIST_NEXT(virt, entry);
 		}
 
 		err = cgroup_modify_cgroup(cg_app);
@@ -395,28 +455,110 @@ err:
 	cgroup_free(&cg_app);
 }
 
-static void cgdcbx_update_iface_cg(struct cgdcbx_iface *iface, bool purge)
+static void cgdcbxd_update_default_iface_prio(struct cgdcbx_iface *iface)
+{
+	char child_name[FILENAME_MAX] = "";
+	void *handle;
+	struct cgroup_file_info info;
+	int ret, level, group_len;
+	struct cgdcbx_entry entry;
+
+	/* Initialize dummy default priority entry */
+	entry.app.selector = 1;
+	entry.app.protocol = 0;
+	entry.app.priority = iface->dflt_priority;
+	entry.active = 1;
+
+	ret = cgroup_walk_tree_begin(NET_PRIO, "/", 0, &handle, &info, &level);
+	if (ret)
+		return;
+
+	ret = cgroup_walk_tree_set_flags(&handle, CGROUP_WALK_TYPE_POST_DIR);
+	if (ret) {
+		cgroup_walk_tree_end(&handle);
+		return;
+	}
+
+	cgdcbx_write_ifpriomap(iface, "/", &entry);
+
+	group_len = strlen(info.full_path);
+
+	/*
+	 * Skip the root group, it will be handled explicitly at the end.
+	 */
+	ret = cgroup_walk_tree_next(0, &handle, &info, level);
+
+	while (ret == 0) {
+		if (info.type == CGROUP_FILE_TYPE_DIR && info.depth > 0) {
+			struct cgdcbx_entry *np;
+			int selector = 0, protocol = 0;
+
+			snprintf(child_name, sizeof(child_name), "%s",
+				 info.full_path + group_len);
+			sscanf(info.full_path + group_len,
+			      "cgdcb-%i", &selector);
+
+			if (selector == 1)
+				sscanf(info.full_path + group_len,
+				      "cgdcb-%i-%4x", &selector, &protocol);
+			else
+				sscanf(info.full_path + group_len,
+				       "cgdcb-%i-%i", &selector, &protocol);
+
+
+			LIST_FOREACH(np, &iface->apps, entry) {
+				if (np->app.selector == selector &&
+				    np->app.protocol == protocol)
+					break;
+			}
+
+			if (!np)
+				cgdcbx_write_ifpriomap(iface,
+						       child_name, &entry);
+		}
+		ret = cgroup_walk_tree_next(0, &handle, &info, level);
+	}
+	cgroup_walk_tree_end(&handle);
+	return;
+}
+
+static void cgdcbx_modify_cgroup(struct cgdcbx_iface *iface,
+				 struct cgdcbx_entry *np)
+{
+	char file[19];
+
+	/* selector == 1 and protocol == 0 is a special case which
+	 * indicates the default priority should be set. All other
+	 * cases use the selector-protocol control group syntax.
+	 */
+	if ((iface->mode == DCB_CAP_DCBX_VER_IEEE) &&
+	    np->app.selector == 1 &&
+	    np->app.protocol == 0) {
+		snprintf(file, sizeof(file), "/");
+		iface->dflt_priority = np->app.priority;
+	} else if (np->app.selector == 1) {
+		snprintf(file, sizeof(file), "cgdcb-%i-%04x",
+			 np->app.selector,
+			 np->app.protocol);
+	} else {
+		snprintf(file, sizeof(file), "cgdcb-%i-%i",
+			 np->app.selector,
+			 np->app.protocol);
+	}
+
+	cgdcbx_write_ifpriomap(iface, file, np);
+}
+
+static void cgdcbx_update_iface_cg(struct cgdcbx_iface *iface)
 {
 	struct cgdcbx_entry *entry;
 
 	entry = LIST_FIRST(&iface->apps);
 	while (entry) {
 		struct cgdcbx_entry *np = entry;
-		struct cgdcbx_virt *virt;
 
 		entry = LIST_NEXT(entry, entry);
-		cgdcbx_modify_cgroup(iface->ifname, iface, np, purge);
-
-		if (!purge) {
-			virt = LIST_FIRST(&iface->virt);
-			while (virt) {
-				struct cgdcbx_virt *v = virt;
-
-				virt = LIST_NEXT(virt, entry);
-				cgdcbx_modify_cgroup(v->ifname, iface,
-						     np, purge);
-			}
-		}
+		cgdcbx_modify_cgroup(iface, np);
 	}
 
 	return;
@@ -427,7 +569,7 @@ static void cgdcbx_update_iface_cg_all(void)
 	struct cgdcbx_iface *iface;
 
 	LIST_FOREACH(iface, &iface_list, entry) {
-		cgdcbx_update_iface_cg(iface, false);
+		cgdcbx_update_iface_cg(iface);
 	}
 #ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
 	cgroup_change_all_cgroups();
@@ -543,7 +685,7 @@ static void cgdcbx_int_signal()
 			app->active = false;
 		}
 
-		cgdcbx_update_iface_cg(np, true);
+		cgdcbx_update_iface_cg(np);
 		cgdcbx_free_iface(np, NULL);
 	}
 
@@ -554,11 +696,12 @@ static void cgdcbx_purge_apps(struct cgdcbx_iface *iface)
 {
 	struct cgdcbx_entry *app;
 
-	LIST_FOREACH(app, &iface->apps, entry) {
+	LIST_FOREACH(app, &iface->apps, entry)
 		app->active = false;
-	}
 
-	cgdcbx_update_iface_cg(iface, true);
+	iface->dflt_priority = 0;
+	cgdcbx_update_iface_cg(iface);
+	cgdcbxd_update_default_iface_prio(iface);
 }
 
 static void cgdcbx_parse_app_table(struct cgdcbx_iface *iface,
@@ -571,6 +714,8 @@ static void cgdcbx_parse_app_table(struct cgdcbx_iface *iface,
 		np->active = false;
 		np->app.priority = 0;
 	}
+
+	iface->dflt_priority = 0;
 
 	mnl_attr_for_each_nested(pos, nested) {
 		struct dcb_app *app;
@@ -588,7 +733,8 @@ static void cgdcbx_parse_app_table(struct cgdcbx_iface *iface,
 				iface->ifname);
 	}
 
-	cgdcbx_update_iface_cg(iface, false);
+	cgdcbx_update_iface_cg(iface);
+	cgdcbxd_update_default_iface_prio(iface);
 #ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
 	cgroup_change_all_cgroups();
 #endif
@@ -674,7 +820,10 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 
 	LIST_FOREACH(np, &iface->apps, entry) {
 		np->active = false;
+		np->app.priority = 0;
 	}
+
+	iface->dflt_priority = 0;
 
 	mnl_attr_for_each_nested(pos, nested) {
 		struct dcb_app app;
@@ -716,7 +865,8 @@ static void cgdcbx_parse_cee_app_table(struct cgdcbx_iface *iface,
 		}
 	}
 
-	cgdcbx_update_iface_cg(iface, false);
+	cgdcbx_update_iface_cg(iface);
+	cgdcbxd_update_default_iface_prio(iface);
 #ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
 	cgroup_change_all_cgroups();
 #endif
@@ -731,6 +881,7 @@ static struct cgdcbx_iface *cgdcbx_add_iface(const char *ifname)
 
 	entry->ifname = strdup(ifname);
 	entry->ifindex = if_nametoindex(ifname);
+	entry->dflt_priority = 0;
 
 	if (!entry->ifname)
 		return NULL;
@@ -1137,7 +1288,7 @@ int main(int argc, char *argv[])
 			if ((data.ifi_flags & IFF_RUNNING) &&
 			    (data.nlmsg_type != RTM_DELLINK) &&
 			    data.iface) {
-				cgdcbx_update_iface_cg(data.iface, false);
+				cgdcbx_update_iface_cg(data.iface);
 #ifdef HAVE_CGROUP_CHANGE_ALL_CGROUPS
 				cgroup_change_all_cgroups();
 #endif
