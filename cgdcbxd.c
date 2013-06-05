@@ -971,6 +971,8 @@ int main(int argc, char *argv[])
 	int rcv_size = 8192;
 	fd_set fds, readfds;
 	sigset_t sigset;
+	struct cgroup_mount_point info;
+	void *handle;
 	static struct mnl_socket *nl_dcb, *nl_rt;
 	struct sigaction sa_usr1, sa_int;
 	struct option longopts[] = {
@@ -1003,6 +1005,19 @@ int main(int argc, char *argv[])
 	if (ret) {
 		fprintf(stderr, "%s: libcgroup initialization failed: %s\n",
 			argv[0], cgroup_strerror(ret));
+		exit(EXIT_FAILURE);
+	}
+
+	err = cgroup_get_controller_begin(&handle, &info);
+	while (!err) {
+		if (strcmp(NET_PRIO, info.name) == 0)
+			break;
+		err = cgroup_get_controller_next(&handle, &info);
+	}
+
+	if (err == ECGEOF) {
+		fprintf(stderr, "%s: net_prio cgroup not mounted: %s\n",
+			argv[0], cgroup_strerror(err));
 		exit(EXIT_FAILURE);
 	}
 
