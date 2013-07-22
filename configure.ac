@@ -1,4 +1,4 @@
-AC_INIT([cgdcbx], [1.0.1])
+AC_INIT([cgdcbx], [1.0.2])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
 
 AC_PROG_CC
